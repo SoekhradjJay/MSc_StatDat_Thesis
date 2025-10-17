@@ -15,7 +15,7 @@ After cloning the repository, the following structure can be found:
   - `results` - output of simulation stored per simulated scenario (called condition)
   - `study zone` - polygons of municipalities in The Netherlands, from: https://www.pdok.nl/atom-downloadservices/-/article/bestuurlijke-gebieden
 - `plots_and_analysis` - .RMD files with code for images in methodology and results section
-  - `To_git.R` - R.proj file which can be saved locally and used as reference root (recommended)
+- `To_git.R` - R.proj file which can be saved locally and used as reference root (recommended)
 - `0.GetPackages.R` - R script Installer of all used packages for the simulation
 - `1.Formulas&Functions.R` - R script for all formulas and functions used in the simulation. Alter parameters here.
 - `2.Prep_StudyZone&LU&AggregationGrids.R` - Read (your own) study zone, land use polygons, and aggregation grids. Optionally make them.

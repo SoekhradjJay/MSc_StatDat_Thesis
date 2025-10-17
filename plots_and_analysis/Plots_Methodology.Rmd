@@ -1,0 +1,367 @@
+---
+title: "Plots in thesis"
+author: "Jayant Soekhradj"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prelude
+
+In this RMD file, we show the plots that were used in the thesis. 
+We reproduced some of the original code in here for illustration purposes.
+
+
+# Load data 
+```{r}
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(patchwork)
+library(gstat)
+library(mvtnorm)
+```
+
+
+
+
+# Buffer zone plot
+```{r}
+# load in the polygons
+prov_tmp2 = read_sf("../data/study_zone/BestuurlijkeGebieden_2024.gpkg")
+
+# get polygons
+plot_sel = prov_tmp2 %>% 
+  filter(ligt_in_provincie_naam == "Zuid-Holland") %>%
+  dplyr::select(identificatie, geom)
+
+# make grid
+plot_grid = st_make_grid(x = plot_sel, cellsize = 1000) %>% st_as_sf()
+plot_grid$ID = 1:nrow(plot_grid) 
+
+# intersect
+plot_inters = st_intersection(plot_sel, plot_grid)
+plot_inters$area = st_area(plot_inters) %>% as.numeric()
+
+# find intersected cells
+intersected_cells <- plot_inters %>% 
+  filter(area < 1000*1000 -1 ) %>% 
+  pull(ID)
+
+mun_border_int = intersected_cells[duplicated(intersected_cells)]
+
+selected_mun = plot_grid %>% 
+  filter(ID %in% mun_border_int)
+
+nb_idx <- st_touches(selected_mun, plot_grid)   # list of integer indices
+nb_idx <- unique(unlist(nb_idx))  # flatten
+
+# Get neighbour cells
+neighbours <- plot_grid[nb_idx, ]
+
+neighbours_inters = st_intersection(neighbours, plot_sel)
+
+plot(neighbours_inters)
+plot(plot_inters[, "ID" ])
+``` 
+
+```{r}
+# plot 1: full grid
+p1 <- ggplot() +
+  geom_sf(data = plot_inters %>% dplyr::select(ID, geom), fill = "white", color = "black", size = 0.2) +
+ ggtitle("Original clipped grid") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# plot 2: only filtered cells
+p2 <- ggplot() +
+  geom_sf(data = neighbours_inters, fill = "white", color = "black", size = 0.3) +
+ ggtitle("Buffer zone") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# combine side by side
+p1 + p2
+```
+
+# Weight sets plot
+```{r}
+# given values
+x_vals_plot <- c(0.01, 0.08, 0.15, 0.22, 0.29, 0.36, 0.43, 0.50)
+alphas_plot <- c(0.0, 0.1, 0.2, 0.5, 0.7, 1.0, 2.0, 5.0, 7.0, 10.0)
+
+# create dataframe
+df <- expand.grid(x = x_vals_plot, alpha = alphas_plot) %>%
+  mutate(
+    w = exp(-alpha * x),
+    alpha = as.factor(alpha)
+  )
+
+# prepare label positions at the last x
+labels_df <- df %>%
+  group_by(alpha) %>%
+  filter(x == max(x)) %>%
+  ungroup() %>%
+  # build plotmath expression dynamically
+  mutate(label = paste0("alpha==", alpha))
+
+# plot
+ggplot(df, aes(x = x, y = w, group = alpha, color = alpha)) +
+  geom_line(size = 0.5) +
+  geom_point(size = 2.5) +  # sampled locations
+  #geom_vline(xintercept = x_vals_plot, linetype = "dashed", size = 0.6, color = "grey50") +
+  geom_text(
+    data = labels_df,
+    aes(label = label),
+    parse = TRUE,       # interpret as plotmath
+    hjust = -0.5,
+    size = 3.5,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(
+    values = c(
+      "0" = "orange",
+      "10" = "purple",
+      setNames(rep("darkgrey", length(alphas_plot)-2), 
+               as.character(alphas_plot[!alphas_plot %in% c(0, 10)]))
+    )
+  ) +
+  labs(
+    x = expression(x ~ "(sample locations)"),
+    y = expression(w[LU])
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "none"
+  ) +
+  xlim(0, max(x_vals_plot) * 1.1)  # space for labels
+
+
+```
+
+# Plots simulation pipeline
+
+## Preprocessing plots
+We first plot the kriging grid (full)
+```{r}
+set.seed(420)
+int_tmp = plot_sel %>% st_union() %>% st_intersection(., plot_grid) %>% st_as_sf()
+
+sample_points <- st_sample(plot_sel, size = 100, type = "random")
+
+sample_points <- st_sf(geometry = sample_points,
+                       value = rnorm(length(sample_points)))
+
+# sample_points <- st_sf(geometry = sample_points,
+#                        value = runif(length(sample_points), 0, 1))
+
+# Convert to sp objects for gstat
+sample_sp <- as(sample_points, "Spatial")
+grid_sp   <- as(int_tmp, "Spatial")
+
+#--- 4. Define variogram model ---
+# Ordinary kriging: nugget = 0.1, partial sill = 1, exponential, range = 2500
+vgm_model <- vgm(psill = 1, model = "Exp", range = 2500, nugget = 0.1)
+
+#--- 5. Perform ordinary kriging ---
+g <- gstat(formula = value ~ 1, data = sample_sp, model = vgm_model)
+kriging_result <- predict(g, grid_sp)
+
+#--- 6. Convert results back to sf for plotting ---
+kriging_sf <- st_as_sf(kriging_result)
+
+full_krig_p <- ggplot(data = kriging_sf, aes(fill = exp(var1.pred))) +
+  geom_sf() +
+  scale_fill_viridis_c(option = "D", name = expression(w[KR])) +
+  theme_void() +
+  labs(title = expression("Kriged grid (" * w[KR] * ")")) +
+  theme(plot.title = element_text(hjust = 0.6))
+```
+
+Now we create the land use polygons plot
+```{r}
+
+# Get polygons
+LU_polygon <- st_read("../data/LU_poly/LU_polygon-05082025.gpkg")
+LU_plot <- LU_polygon
+LU_plot$class <- sample(1:8, nrow(LU_plot), replace = T)
+
+# Get weights that were used in simulation
+LU_plot_df = 
+  data.frame(
+    class = 1:8,
+    w_LU = exp(-10 * x_vals_plot)
+  )
+
+# add the classes and weights to the polygons
+LU_plot <- LU_plot %>% 
+  left_join(LU_plot_df, by = "class")
+
+# create plot
+LU_p <- ggplot(data = LU_plot, aes(fill = w_LU)) +
+  geom_sf() +
+  scale_fill_viridis_c(option = "B", name = expression(w[LU])) +
+  theme_void() +
+  labs(title = expression("Land use weights (" * w[LU] * ")")) +
+  theme(plot.title = element_text(hjust = 0.6))
+```
+
+We filter the kriged grid with the buffer zone (plot_sel)
+```{r}
+# filter only the cells that become intersected at kriging grid...
+kriging_sf$ID = 1:nrow(kriging_sf)
+filter_int = st_intersection(kriging_sf, plot_sel)
+
+filter_int = filter_int %>% 
+  filter(ID %in% filter_int$ID[duplicated(filter_int$ID)])
+
+nb_idx <- st_touches(filter_int, kriging_sf)   # list of integer indices
+nb_idx <- unique(unlist(nb_idx))  # flatten
+
+final_selection_plot = kriging_sf %>% 
+  filter(ID %in% nb_idx)
+
+filt_krig_p <- ggplot(data = final_selection_plot, aes(fill = exp(var1.pred))) +
+  geom_sf() +
+  scale_fill_viridis_c(option = "D", name = expression(w[KR])) +
+  theme_void() +
+  labs(title = expression("Filtered kriged grid (" * w[KR] * ")")) +
+  theme(plot.title = element_text(hjust = 0.6))
+```
+
+## Plots in report
+Now we can create the map to get the baseline density:
+```{r}
+# intersect land use with buffered grid
+int_weights = st_intersection(LU_plot, final_selection_plot)
+
+# calculate the baseline density
+int_weights = int_weights %>% 
+  mutate(base_dens = exp(var1.pred) * w_LU)
+
+# plot baseline density
+basedense_p <- ggplot(data = int_weights, aes(fill = base_dens)) +
+  geom_sf() +
+  scale_fill_viridis_c(option = "D", name = "Baseline density") +
+  theme_void() +
+  labs(title = expression("Baseline density (" * w[KR] * ") x (" * w[LU] * ")" )) +
+  theme(plot.title = element_text(hjust = 0.6))
+
+```
+
+We convert the density to a count, which is normalized to get the baseline density count
+```{r}
+# get area (for conversion to count)
+int_weights$area = st_area(int_weights) %>% as.numeric()
+
+# convert to count
+int_weights = int_weights %>% 
+  mutate(baseline_count = base_dens * area)
+
+# calculate normalization factor
+norm_fact <- int_weights$baseline_count %>% sum()
+
+# perform normalization
+int_weights = int_weights %>% 
+  mutate(norm_count = baseline_count / norm_fact * 200000)
+
+# create count plot
+basecount_p <- ggplot(data = int_weights, aes(fill = baseline_count)) +
+  geom_sf() +
+  scale_fill_viridis_c(option = "D", name = "Baseline count" ) +
+  theme_void() +
+  labs(title = "Baseline count") +
+  theme(plot.title = element_text(hjust = 0.6), legend.position = "bottom", legend.text = element_text(angle = 45, hjust = 1))
+
+# create normalized count plot
+basecount_normp <- ggplot(data = int_weights, aes(fill = norm_count)) +
+  geom_sf() +
+  scale_fill_viridis_c(option = "D", name = "Baseline \nnormalized \ncount") +
+  theme_void() +
+  labs(title = "Baseline normalized count") +
+  theme(plot.title = element_text(hjust = 0.6), legend.position = "bottom")
+```
+
+Plot all relevant plots
+```{r}
+full_krig_p + LU_p
+basedense_p 
+basecount_p
+basecount_normp
+```
+
+
+Show the points within a polygon
+```{r}
+
+# Select a polygon 
+poly <- int_weights[10, ]
+
+# Sample 19 points inside the polygon
+pts <- st_sample(poly, size = 19)
+pts_sf <- st_sf(geometry = pts)  # wrap into sf object for ggplot
+
+# Plot polygon + points
+ggplot(data = poly) +
+  geom_sf() +
+  geom_sf(data = pts_sf, color = "black", size = 2, shape = 21, fill = "white") +
+  theme_void() +
+  labs(title = "Generated points within a polygon") +
+  theme(plot.title = element_text(hjust = 0.6))
+
+  
+```
+
+## Isotropic and anisotropic clusters
+
+```{r}
+
+get_points <- function(sd_x = 10, sd_y = 10, corr_param) {
+  data.frame(
+    rmvnorm(
+      n = 500,
+      mean = c(3, 7),
+      sigma = matrix(c(
+        sd_x^2 , sd_x * sd_y * corr_param,
+        sd_x * sd_y * corr_param, sd_y^2
+      ), nrow = 2)
+    ),
+    corr_param = corr_param
+  )
+}
+
+# Generate multiple clusters
+df_points <- lapply(seq(-1, 1, 0.25), function(r) get_points(corr_param = r)) %>%
+  bind_rows() %>%
+  rename(x = X1, y = X2)
+
+# plot
+ggplot(df_points, aes(x, y)) +
+  geom_point(alpha = 0.5) +
+  coord_equal() +
+  facet_wrap(~ corr_param, labeller = labeller(corr_param = function(x) paste0("rho = ", x))) +
+  theme_minimal() +
+  labs(
+    title = "Isotropic (lower rho) to anisotropic (lower rho) clusters",
+    x = "x", y = "y"
+  ) +
+  theme(
+    legend.position = "none",        # removes color guide
+    strip.text = element_text(size = 10),  # optional: style facet labels
+    axis.text = element_blank()
+  ) 
+ # + geom_smooth(method = "lm", se = FALSE, color = "red4")
+  #  + geom_abline(slope = 0, intercept = 3, color = "yellow4")
+  # + geom_vline(xintercept = 7, color = "yellow4")
+
+
+
+```
+
+

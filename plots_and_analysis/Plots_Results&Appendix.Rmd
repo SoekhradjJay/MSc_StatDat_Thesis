@@ -1,0 +1,1138 @@
+---
+title: "Data analysis"
+author: "Jayant Soekhradj"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# PREP
+
+```{r Load library}
+# Load library
+library(tidyverse)
+library(dplyr)
+library(arrow)
+library(ggplot2)
+library(patchwork)
+library(ggridges)
+
+library(tidyr)
+library(knitr)
+library(kableExtra)
+
+library(mvtnorm)
+```
+
+```{r loading simulation results}
+# get simulation condition
+sim_conditions <- expand.grid(
+  c("smooth", "nonsmooth"), # Kriging (on/off)
+  c("informative", "noninformative"), # land use weights (strong vs. flat)
+  c("clustered", "nonclustered") # cluster presence
+)
+
+# load data
+final_frame = tibble()
+
+# read all data from simulation output
+for (i in 1:nrow(sim_conditions)){
+  file_name = paste0("condition_00", i,".parquet")
+   tmp <- read_parquet(file = paste0("../data/results/run3/", file_name))
+   #print(paste0("data/results/", file_name))
+   final_frame = bind_rows(final_frame, tmp)
+}
+
+# get some extra info in frame (easier analysis)
+# SAW = simple areal weighting, DASYM = dasymetric mapping
+# A binary method is easier for filtering and translations in dx,dy will get a specific ID
+final_frame = final_frame %>% 
+  mutate(method_binary = ifelse(method == "SAW", "SAW", "DASYM"),
+         condition_id  = max(condition_id) + 1 - condition_id) %>% 
+  group_by(cell_size) %>%
+  mutate(
+    translation_id = dense_rank(interaction(dx, dy, lex.order = TRUE))
+  ) %>%
+  ungroup()
+
+# inspect
+head(final_frame)
+```
+
+# Q1: MAUP effects on SAW and DASYM
+
+## MAUP heatmaps stratified for zoning and scaling
+For MAUP effects, we need to know the grid placement and grid resolution effects. Since there are so many conditions as well, each of which having an effect on the rRMSE, we need to account for that. So, for each scenario (condition_id), we calculate the average rRMSE, stratified for the methods, cell resolution and grid placement
+```{r create summary df MAUP}
+# get summary stats for the MAUP
+df_summary <- final_frame %>% 
+  group_by(condition_id, method_binary, cell_size, translation_id) %>%
+  summarise(mean_rRMSE = mean(NRMSE_mean), .groups = "drop")
+```
+
+Code to create the heatmaps for MAUP effects
+```{r preprocessing condition table}
+# get scenario labs for wraps
+scenario_labels = c(
+  `1` = "Scenario 1",
+  `2` = "Scenario 2",
+  `3` = "Scenario 3",
+  `4` = "Scenario 4",
+  `5` = "Scenario 5",
+  `6` = "Scenario 6",
+  `7` = "Scenario 7",
+  `8` = "Scenario 8"
+)
+
+# Original condition table (cond_tbl) that describes the scenarios
+cond_tbl <- data.frame(
+  condition = 1:8,
+  `Ancillary information` = c("-", "-", "+", "+", "-", "-", "+", "+"),
+  `Local Autocorrelation` = c("-", "-", "-", "-", "+", "+", "+", "+"),
+  `Global Autocorrelation` = c("-", "+", "-", "+", "-", "+", "-", "+")
+)
+
+# Convert to long format for plotting
+cond_long <- cond_tbl %>%
+  pivot_longer(-condition, names_to = "Factor", values_to = "Value") %>%
+  mutate(Factor = gsub("\\.", " ", Factor))
+
+# Add a "Scenario" row on top
+cond_top <- data.frame(
+  condition = cond_tbl$condition,
+  Factor = "Scenario",
+  Value = as.character(cond_tbl$condition)
+)
+
+cond_long_plot <- bind_rows(cond_top, cond_long) %>%
+  mutate(Factor = factor(
+    Factor,
+    levels = c(
+      "Ancillary information",
+      "Local Autocorrelation",
+      "Global Autocorrelation",
+      "Scenario"
+    )
+  ))
+
+
+# make condition table for SAW (only scenarios 1,2,5,6 are tested)
+p_table_saw_filtered <- ggplot(cond_long_plot %>% filter(condition %in% c(1,2,5,6)), aes(x=factor(condition), y=Factor, label=Value)) +
+  geom_text(size=3) +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text.y = element_text(size=8),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.margin = margin(t=0)
+  )
+
+# make condition table for dasymetric mapping
+p_table <- ggplot(cond_long_plot, aes(x=factor(condition), y=Factor, label=Value)) +
+  geom_text(size=3) +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text.y = element_text(size=8),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.margin = margin(t=0)
+  )
+```
+
+
+```{r MAUP heatmaps SAW and DASYM}
+# heatmap SAW
+p_heatmap_saw_filtered <- ggplot(df_summary %>% filter(method_binary == "SAW") %>% filter(condition_id %in% c(1,2,5,6)), aes(x = factor(cell_size), 
+                       y = factor(translation_id), 
+                       fill = mean_rRMSE)) +
+  geom_tile() +
+  facet_wrap(.~condition_id, labeller = labeller(condition_id = scenario_labels)) +   # one heatmap per condition
+  scale_fill_viridis_c(option = "plasma") +
+  labs(x = "Cell Size", y = "Grid Shift", fill = "Mean rRMSE") +
+  theme_minimal() + 
+  coord_flip() +
+  labs(
+    title = "MAUP effects mean rRMSE in simple areal weighting"
+  ) +
+    theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size =5),
+    plot.title = element_text(size=12)
+  ) 
+
+# heatmap DASYM
+p_heatmap_dasym <- ggplot(df_summary %>% filter(method_binary != "SAW"), aes(x = factor(cell_size), 
+                       y = factor(translation_id), 
+                       fill = mean_rRMSE)) +
+  geom_tile() +
+  facet_wrap(.~condition_id, labeller = labeller(condition_id = scenario_labels)) +   # one heatmap per condition
+  scale_fill_viridis_c(option = "plasma") +
+  labs(x = "Cell Size", y = "Grid Shift", fill = "Mean rRMSE") +
+  theme_minimal() +
+  coord_flip() +
+    labs(
+    title = "MAUP effects mean rRMSE in dasymetric mapping"
+  ) +
+    theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 5),
+    plot.title = element_text(size=12)
+  )
+
+
+# plot heatmaps
+final_plot_heat_saw_filtered <-  p_heatmap_saw_filtered / p_table_saw_filtered + plot_layout(heights = c(4, 1.5))
+final_plot_heat_saw_filtered
+
+final_plot_heat_dasym <-  p_heatmap_dasym / p_table + plot_layout(heights = c(9, 1.5))
+final_plot_heat_dasym
+```
+
+The heatmaps give a good overview of the mean nRMSE. We also quantified how many times the rRMSE was higher for one resolution compared to the other (scaling effects) and also between shift IDs. This makes it a bit easier to make claims, but we have to average over conditions. When comparing the zoning effect, we have to average over the scaling effect and vice versa. 
+
+## MAUP heatmap only zoning (averaged over scaling)
+
+We create heatmaps (factor matrices) of the zoning. This is the same as above, but average over all cell sizes and conditions. The plots for each condition will be in the appendix.
+```{r MAUP zoning effect ratios}
+df_summary_factors_zoning_master_DM <- final_frame %>%
+  group_by( method_binary, translation_id) %>% #only per shifts
+  summarise(mean_rRMSE = mean(NRMSE_mean), .groups = "drop")
+
+df_summary_factors_zoning_master_SAW <- final_frame %>%
+  filter(condition_id %in% c(1,2,5,6)) %>% 
+  group_by( method_binary, translation_id) %>% #only per shifts
+  summarise(mean_rRMSE = mean(NRMSE_mean), .groups = "drop")
+
+df_matrix_zoning_master_DM <- df_summary_factors_zoning_master_DM %>%
+  group_by(method_binary) %>%
+  group_modify(~ {
+    vals <- .x %>% dplyr::select(translation_id, mean_rRMSE)
+    expand.grid(i = vals$translation_id, j = vals$translation_id) %>%
+      left_join(vals, by = c("i" = "translation_id")) %>%
+      rename(val_i = mean_rRMSE) %>%
+      left_join(vals, by = c("j" = "translation_id")) %>%
+      rename(val_j = mean_rRMSE) %>%
+      mutate(ratio = val_i / val_j)
+  }) %>%
+  ungroup() %>%
+  mutate(
+    i = factor(i, levels = sort(unique(i))),
+    j = factor(j, levels = sort(unique(j)))
+  )
+
+df_matrix_zoning_master_SAW <- df_summary_factors_zoning_master_SAW %>%
+  group_by(method_binary) %>%
+  group_modify(~ {
+    vals <- .x %>% dplyr::select(translation_id, mean_rRMSE)
+    expand.grid(i = vals$translation_id, j = vals$translation_id) %>%
+      left_join(vals, by = c("i" = "translation_id")) %>%
+      rename(val_i = mean_rRMSE) %>%
+      left_join(vals, by = c("j" = "translation_id")) %>%
+      rename(val_j = mean_rRMSE) %>%
+      mutate(ratio = val_i / val_j)
+  }) %>%
+  ungroup() %>%
+  mutate(
+    i = factor(i, levels = sort(unique(i))),
+    j = factor(j, levels = sort(unique(j)))
+  )
+
+# Plot heatmap SAW
+p_master_zoning_SAW <- ggplot(
+  df_matrix_zoning_master_SAW %>%
+    filter(method_binary == "SAW") %>%
+    filter(as.numeric(j) <= as.numeric(i)),  # keep only upper triangle incl. diagonal
+  aes(x = j, y = i, fill = ratio)
+) +
+  geom_tile(color = "white") +
+  # optional: add labels inside tiles
+  geom_text(aes(label = sprintf("%.1f", ratio)), size = 2) +
+  scale_fill_gradient2(
+    low = "cornflowerblue", mid = "white", high = "red4", midpoint = 1
+  ) +
+  #facet_wrap(~ condition_id) +
+  coord_equal() +
+  theme_minimal() +
+  labs(
+    x = "Denominator shift ID",
+    y = "Numerator shift ID",
+    fill = "Ratio",
+    title = "rRMSE ratio between shifts (simple areal weighting)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = -90, size = 5),
+    axis.text.y = element_text(size = 5)
+  )
+
+# Plot heatmap DM
+p_master_zoning_DM = ggplot(
+  df_matrix_zoning_master_DM %>%
+    filter(method_binary != "SAW") %>%
+    filter(as.numeric(j) <= as.numeric(i)),  # keep only upper triangle incl. diagonal
+  aes(x = j, y = i, fill = ratio)
+) +
+  geom_tile(color = "white") +
+  # optional: add labels inside tiles
+  geom_text(aes(label = sprintf("%.1f", ratio)), size = 2) +
+  scale_fill_gradient2(
+    low = "cornflowerblue", mid = "white", high = "red4", midpoint = 1
+  ) +
+  #facet_wrap(~ condition_id) +
+  coord_equal() +
+  theme_minimal() +
+  labs(
+    x = "Denominator shift ID",
+    y = "Numerator shift ID",
+    fill = "Ratio",
+    title = "rRMSE ratio between shifts (dasymetric mapping)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = -90, size = 5),
+    axis.text.y = element_text(size = 5)
+  )
+
+
+
+p_master_zoning_SAW
+p_master_zoning_DM
+```
+
+## MAUP heatmap only scaling (averaged over zoning)
+
+We create heatmaps (factor matrices) of the zoning. This is the same as above, but average over all translations and conditions. The plots for each condition will be in the appendix.
+```{r MAUP scaling effect ratios}
+df_summary_factors_scaling_master_DM <- final_frame %>%
+  group_by( method_binary, cell_size) %>% #only per shifts
+  summarise(mean_rRMSE = mean(NRMSE_mean), .groups = "drop")
+
+df_summary_factors_scaling_master_SAW <- final_frame %>%
+  filter(condition_id %in% c(1,2,5,6)) %>% 
+  group_by( method_binary, cell_size) %>% #only per shifts
+  summarise(mean_rRMSE = mean(NRMSE_mean), .groups = "drop")
+
+
+
+df_matrix_scaling_master_DM <- df_summary_factors_scaling_master_DM %>%
+  group_by( method_binary) %>%
+  group_modify(~ {
+    vals <- .x %>% dplyr::select(cell_size, mean_rRMSE)
+    expand.grid(i = vals$cell_size, j = vals$cell_size) %>%
+      left_join(vals, by = c("i" = "cell_size")) %>%
+      rename(val_i = mean_rRMSE) %>%
+      left_join(vals, by = c("j" = "cell_size")) %>%
+      rename(val_j = mean_rRMSE) %>%
+      mutate(ratio = val_i / val_j)
+  }) %>%
+  ungroup() %>%
+  mutate(
+    i = factor(i, levels = sort(unique(i))),
+    j = factor(j, levels = sort(unique(j)))
+  )
+
+df_matrix_scaling_master_SAW <- df_summary_factors_scaling_master_SAW %>%
+  group_by( method_binary) %>%
+  group_modify(~ {
+    vals <- .x %>% dplyr::select(cell_size, mean_rRMSE)
+    expand.grid(i = vals$cell_size, j = vals$cell_size) %>%
+      left_join(vals, by = c("i" = "cell_size")) %>%
+      rename(val_i = mean_rRMSE) %>%
+      left_join(vals, by = c("j" = "cell_size")) %>%
+      rename(val_j = mean_rRMSE) %>%
+      mutate(ratio = val_i / val_j)
+  }) %>%
+  ungroup() %>%
+  mutate(
+    i = factor(i, levels = sort(unique(i))),
+    j = factor(j, levels = sort(unique(j)))
+  )
+
+# Plot heatmap SAW
+p_master_scaling_SAW = ggplot(
+  df_matrix_scaling_master_SAW %>%
+    filter(method_binary == "SAW") %>%
+    filter(as.numeric(j) <= as.numeric(i)),  # keep only upper triangle incl. diagonal
+  aes(x = j, y = i, fill = ratio)
+) +
+  geom_tile(color = "white") +
+  # optional: add labels inside tiles
+  geom_text(aes(label = sprintf("%.1f", ratio)), size = 2.8) +
+  scale_fill_gradient2(
+    low = "cornflowerblue", mid = "white", high = "red4", midpoint = 1
+  ) +
+  #facet_wrap(~ condition_id) +
+  coord_equal() +
+  theme_minimal() +
+  labs(
+    x = "Denominator resolution",
+    y = "Numerator resolution",
+    fill = "Ratio",
+    title = "rRMSE ratio between resolutions (simple areal weighting)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = -90, size = 5),
+    axis.text.y = element_text(size = 5)
+  )
+
+# Plot heatmap DM
+p_master_scaling_DM = ggplot(
+  df_matrix_scaling_master_DM %>%
+    filter(method_binary != "SAW") %>%
+    filter(as.numeric(j) <= as.numeric(i)),  # keep only upper triangle incl. diagonal
+  aes(x = j, y = i, fill = ratio)
+) +
+  geom_tile(color = "white") +
+  # optional: add labels inside tiles
+  geom_text(aes(label = sprintf("%.1f", ratio)), size = 2.8) +
+  scale_fill_gradient2(
+    low = "cornflowerblue", mid = "white", high = "red4", midpoint = 1
+  ) +
+  #facet_wrap(~ condition_id) +
+  coord_equal() +
+  theme_minimal() +
+  labs(
+    x = "Denominator resolution",
+    y = "Numerator resolution",
+    fill = "Ratio",
+    title = "rRMSE ratio between resolutions (dasymetric mapping)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = -90, size = 5),
+    axis.text.y = element_text(size = 5)
+  )
+
+p_master_scaling_SAW
+p_master_scaling_DM
+```
+
+As plot for the report, we make it a bit nicer:
+```{r report MAUP scaling and zoning heatmaps separately }
+
+# scaling
+p_master_scaling_SAW +
+  labs(title = "Simple areal weighting") +
+  scale_fill_gradient2(
+    low = "cornflowerblue",
+    mid = "white",
+    high = "red4",
+    midpoint = 1,
+    limits = c(1, 61)
+  ) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+  ) +
+  p_master_scaling_DM +
+  labs(title = "Dasymetric mapping", y = " ") +
+  scale_fill_gradient2(
+    low = "cornflowerblue",
+    mid = "white",
+    high = "red4",
+    midpoint = 1,
+    limits = c(1, 61)
+  ) +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10)) +
+    plot_annotation(title = "MAUP: scaling effect rRMSE ratios",
+                  theme = theme(
+      plot.title = element_text(
+        size = 16, face = "bold", hjust = 0.5, vjust = 1
+      ),
+      plot.margin = margin(10, 10, 10, 10)
+    ))
+
+# zoning
+p_master_zoning_SAW +
+  labs(title = "Simple areal weighting") +
+  scale_fill_gradient2(
+    low = "blue3",
+    mid = "white",
+    high = "orange3",
+    midpoint = 1,
+    limits = c(0.6, 2.6)
+  ) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+  ) +
+  p_master_zoning_DM +
+  labs(title = "Dasymetric mapping", y = " ") +
+  scale_fill_gradient2(
+    low = "blue3",
+    mid = "white",
+    high = "orange3",
+    midpoint = 1,
+    limits = c(0.6, 2.6)
+  ) +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10)) +
+  plot_annotation(title = "MAUP: zoning effect rRMSE ratios",
+                  theme = theme(
+      plot.title = element_text(
+        size = 16, face = "bold", hjust = 0.5, vjust = 1
+      ),
+      plot.margin = margin(10, 10, 10, 10)
+    ))
+    
+```
+
+In the zoning plot for simple areal weighting, we can distinguish approximately 3 groups (low, middle, high rRMSE). This could indicate that there are systematic effects of zoning present. When looking at the grid IDs, we can see that the groups can be the aligned grid, the diagonal shifts, and the last for solely horizontal or vertical shifts. We checked if the three groups persist at each resolution level as well (since in the heatmaps above we averaged over the zoning effects).
+
+## MAUP rRMSE distribution for shift types
+
+Apart from investigating the means, we also looked at the distributions. We stratfied only for the conditions and the cell size, because the effects were visible there the most. 
+```{r MAUP rRMSE distributions}
+
+# create labels for plot
+cell_labels <- c(
+  "100"  = "100x100m",
+  "500"  = "500x500m",
+  "1000" = "1000x1000m"
+)
+
+
+# plot SAW rRMSE distributions stratified for MAUP
+final_frame %>%
+  filter(method_binary == "SAW") %>%
+  filter(condition_id %in% c(1,2,5,6)) %>% 
+  ggplot(aes(
+    x = NRMSE_mean,
+    y = factor(condition_id),  # condition splits the ridges
+    fill = factor(condition_id)
+  )) +
+  scale_fill_viridis_d(option = "plasma",guide = "none") +
+  geom_density_ridges(
+    alpha = 0.5,
+    scale = 4,
+    rel_min_height = 0.01, 
+  ) +
+  facet_wrap(cell_size~., scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  theme_minimal() +
+  labs(
+    x = "rRMSE",
+    y = "Scenario",
+    title = "rRMSE distribution per scenario and cell resolution for simple areal weighting"
+  )
+
+# plot DM rRMSE distributions stratified for MAUP
+final_frame %>%
+  filter(method_binary != "SAW") %>%
+  ggplot(aes(
+    x = NRMSE_mean,
+    y = factor(condition_id),  # condition splits the ridges
+    fill = factor(condition_id)
+  )) +
+  scale_fill_viridis_d(option = "plasma", guide = "none") +
+  geom_density_ridges(
+    alpha = 0.5,
+    scale = 4,
+    rel_min_height = 0.01
+  ) +
+  facet_wrap(cell_size~., scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  theme_minimal() +
+    labs(
+    x = "rRMSE",
+    y = "Scenario",
+    title = "rRMSE distribution per scenario and cell resolution for dasymetric mapping"
+  )
+
+```
+
+
+For simple areal weighting, we clearly see three peaks for the 500x500m and 1000x1000m resolutions for each condition. However, at 100x100m, the three peaks are not visible for conditions 3 and 4. When looking at the dasymetric mapping distributions, not a clear pattern in distributions is seen. However, the rRMSE shows that the distribution is not wide for all resolutions. To be sure that the peaks really originate from the shifts, we stratified the peaks based on shift group:
+
+```{r MAUP rRMSE distributions stratified for shift groups}
+# extra plot to show the relationship of peaks with translation shifts
+
+# my colors
+my_colors <- c(
+  "1"  = "blue",
+  "2"  = "red",
+  "3"  = "red",
+  "4"  = "red",
+  "5"  = "red",
+  "9"  = "red",
+  "13" = "red",
+  "6"  = "green",
+  "7"  = "green",
+  "8"  = "green",
+  "10" = "green",
+  "11" = "green",
+  "12" = "green",
+  "14" = "green",
+  "15" = "green",
+  "16" = "green"
+)
+
+
+# SAW rRMSE distributions
+final_frame %>%
+  filter(method_binary == "SAW") %>%
+  filter(condition_id %in% c(1,2,5,6)) %>% 
+  ggplot(aes(
+    x = NRMSE_mean,
+    y = factor(condition_id),
+    fill = factor(translation_id)
+  )) +
+  geom_density_ridges(alpha = 0.1, scale = 1, rel_min_height = 0.01) +
+  facet_wrap(~cell_size, scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  labs(x = "rRMSE", y = "Scenario", fill = "Translation ID",
+       title = "rRMSE distributions: grouping effects of shifts in simple areal weighting",
+       caption = "blue = no shift\nred = vertical/horizontal shifts\ngreen = diagonal shifts") +
+  theme_minimal() +
+  scale_fill_manual(values = my_colors) +
+  guides(fill = guide_legend(ncol = 2))
+  
+# DM aligned grid rRMSE distributions
+final_frame %>%
+  filter(method_binary != "SAW") %>%
+  filter(translation_id %in% c(1)) %>% 
+  ggplot(aes(
+    x = NRMSE_mean,
+    y = factor(condition_id),
+    fill = factor(translation_id)
+  )) +
+  geom_density_ridges(alpha = 0.4, scale = 1, rel_min_height = 0.01) +
+  facet_wrap(~cell_size, scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  labs(x = "rRMSE", y = "Scenario", fill = "Translation ID",
+       title = "rRMSE distributions: grouping effects of translations in dasymetric mapping \n (no shift)") +
+  theme_minimal() +  scale_fill_manual(values = my_colors) +
+  guides(fill = "none") 
+
+# DM vertical/horizontal shifts only  rRMSE distributions
+final_frame %>%
+  filter(method_binary != "SAW") %>%
+  filter(translation_id %in% c(2,3,4,5,9,13)) %>% 
+  ggplot(aes(
+    x = NRMSE_mean,
+    y = factor(condition_id),
+    fill = factor(translation_id)
+  )) +
+  geom_density_ridges(alpha = 0.4, scale = 1, rel_min_height = 0.01) +
+  facet_wrap(~cell_size, scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  labs(x = "rRMSE", y = "Scenario", fill = "Translation ID",
+       title = "rRMSE distributions: grouping effects of translations in dasymetric mapping \n (horizontal/vertical shifts)") +
+  theme_minimal() +
+  scale_fill_manual(values = my_colors) +
+  guides(fill = "none") 
+
+# DM diagonal shifts  rRMSE distributions
+final_frame %>%
+  filter(method_binary != "SAW") %>%
+  filter(translation_id %in% c(6,7,8,10,11,12,14,15,16)) %>% 
+  ggplot(aes(
+    x = NRMSE_mean,
+    y = factor(condition_id),
+    fill = factor(translation_id)
+  )) +
+  geom_density_ridges(alpha = 0.4, scale = 1, rel_min_height = 0.01) +
+  facet_wrap(~cell_size, scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  labs(x = "rRMSE", y = "Scenario", fill = "Translation ID",
+       title = "rRMSE distributions: grouping effects of translations in dasymetric mapping \n (diagonal shifts)") +
+  theme_minimal() +
+  scale_fill_manual(values = my_colors) +
+  guides(fill = "none") 
+```
+
+For simple areal weighting its evident that the three shift groups seems to produce distinguishable results, especially for coarser grids. For dasymetric mapping, the peaks are relatively close for each grid shift, meaning that it is harder to distinguish grid effects. 
+
+In the subsequent analysis, it might be unwise to simply average over all translation grids for simple areal weighting. So, we decided to stratify the analysis by grouping over the grid resolutions and to average per shift type. We chose to do this for both techniques, because it seemed that it could harm the interpretation for SAW. For dasymetric this would be less. 
+
+
+# Q2: conditions per technique (Q3 implied).
+```{r}
+plot_SAW_conditions <- final_frame %>%
+  mutate(
+    shift_type = case_when(
+      translation_id == 1 ~ "no shift",
+      translation_id %in% c(2, 3, 4, 5, 9, 13) ~ "vertical/horizontal \n shift",
+      translation_id %in% c(6, 7, 8, 10, 11, 12, 14, 15, 16) ~ "diagonal shift",
+      TRUE ~ "other"   # optional catch-all
+    ),
+    shift_type = factor(
+      shift_type,
+      levels = c("no shift", "vertical/horizontal \n shift", "diagonal shift")
+    )
+  ) %>%
+  filter(method_binary == "SAW") %>%
+  filter(condition_id %in% c(1,2,5,6)) %>% 
+  group_by(condition_id, cell_size, shift_type) %>%
+  summarise(
+    mean_val = mean(NRMSE_mean, na.rm = TRUE),
+    sd_val   = sd(NRMSE_mean, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(
+    x = factor(condition_id),
+    y = mean_val,
+    color = factor(shift_type),
+    group = shift_type
+  )) +
+  geom_point(position = position_dodge(width = 0.4), size = 1) +
+  geom_errorbar(
+    aes(ymin = mean_val - sd_val, ymax = mean_val + sd_val),
+    width = 1,
+    position = position_dodge(width = 0.4)
+  ) +
+  facet_wrap(cell_size ~ .,
+             scales = "free",
+             labeller = labeller(cell_size = cell_labels)) +
+  labs(
+    x = "Scenario",
+    y = "rRMSE (mean +- SD)",
+    color = "Grid shift type",
+    title = "rRMSE stratified by MAUP effects simple areal weighting "
+    
+  ) +
+  theme_minimal() +
+  scale_color_discrete(type = c("cornflowerblue", "darkseagreen", "orange"))
+
+
+plot_SAW_conditions / p_table_saw_filtered + plot_layout(heights = c(8, 1))
+
+```
+
+We grouped the data to calculate the mean rRMSE for each combination of grid cell resolution, shift type, and scenario. We see that for $1000 \times 1000\,\text{m}$ and $500 \times 500\,\text{m}$ the patterns are the same. Also, between translation IDs, the patterns are the same. Altogether, this indicates that the global and local autocorrelation conditions exert an effect that is independent of the MAUP aspects, albeit absolutely larger at a coarser resolution and at diagonal shifts. We see that the rRMSE increased when global autocorrelation was introduced (scenario 1 vs 2). However, local autocorrelation seemed to decrease the rRMSE at the $500 \times 500\,\text{m}$ and $1000 \times 1000\,\text{m}$ resolutions. At $100 \times 100\,\text{m}$ resolution, we see that the pattern is different. Compared to the baseline scenario 1, the global and local autocorrelation led to an increased rRMSE. The combined effect (scenario 6) for all resolution resulted in an increased rRMSE compared to scenario 1. 
+
+
+
+
+```{r}
+plot_dasym_conditions <- final_frame %>%
+  mutate(shift_type = case_when(
+    translation_id == 1 ~ "no shift",
+    translation_id %in% c(2, 3, 4, 5, 9, 13) ~ "vertical/\nhorizontal shift",
+    translation_id %in% c(6, 7, 8, 10, 11, 12, 14, 15, 16) ~ "diagonal shift",
+    TRUE ~ "other"   # optional catch-all
+  ), 
+  shift_type = factor(shift_type, levels = c("no shift", "vertical/\nhorizontal shift", "diagonal shift")
+                      )) %>% 
+  filter(method_binary != "SAW") %>%
+#  filter(method %in% c("dasym_1", "dasym_10")) %>% 
+#  mutate(method = factor(method, levels = c("dasym_1", "dasym_7", "dasym_10"))) %>% 
+  group_by(condition_id, cell_size, shift_type, method_binary) %>%
+  summarise(
+    mean_val = mean(NRMSE_mean, na.rm = TRUE),
+    sd_val   = sd(NRMSE_mean, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  ggplot(aes(
+    x = factor(condition_id),
+    y = mean_val,
+    color = factor(shift_type),
+    group = shift_type
+  )) +
+  geom_point(position = position_dodge(width = 0.6), size = 1) +
+  geom_errorbar(
+    aes(ymin = mean_val - sd_val, ymax = mean_val + sd_val),
+    width = 1,
+    position = position_dodge(width = 0.6)
+  ) +
+  facet_grid(.~cell_size, scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  labs(
+    x = "Scenario",
+    y = "rRMSE (mean +- SD)",
+    color = "Grid shift type",
+    title = "rRMSE stratified by MAUP effects dasymetric mapping"
+  ) +
+  theme_minimal() +
+  scale_color_discrete(type = c("cornflowerblue", "darkseagreen", "orange")) +
+    theme(
+    legend.title = element_text(size = 8, face = "bold"),
+    legend.text = element_text(size = 8)
+  )
+
+plot_dasym_conditions / p_table + plot_layout(heights = c(8, 1))
+
+```
+
+For dasymetric mapping, we calculated the mean rRMSE similarly as for simple areal weighting (with the same stratifications). However, we also stratified for the dasymetric weight sets. As reminder, dasymetric mapping requried a user-specified weight set that denoted the expectation of the relationship between the variable of interest (count) and the ancillary variable land use. We tested a range of dasymetric weight sets, but we picked three sets, representing an expectation of no relationship alpha= 0, intermediary relationship alpha = 2, and a strong relationship alpha= 10 as specified in figure.... 
+
+Like in simple areal weighting, we observed that the patterns on $500 \times 500\,\text{m}$ and $1000 \times 1000\,\text{m}$ are similar between the tested scenarios, but scaled down. As in simple areal weighting the patterns are similar between translation IDs. However, the rRMSE tends to be small for dasymetric mapping, independent of resolution or shift types. The results are indicative of spatial condition effects independent of the MAUP, albeit that the effects are larger at coarser resolutions and at diagonal shifts, which was also found for simple areal weighting.
+
+Since dasymetric mapping is based on user-specified weights, we start with the findings for the ancillary information condition. When comparing scenarios 1 with 3, 2 with 4, 5 with 7, 6 with 8, we see the effects of adding ancillary information to datasets. At the $500 \times 500\,\text{m}$ and $1000 \times 1000\,\text{m}$ resolutions and for each shift type, the rRMSE seems to be higher when a user assumes that there is a relationship between count and land use that actually does not exist in the true dataset, compared to the opposite scenario in which a user specified no relationship while one actually does exist. This would indicate that assuming a strong relationship between land use and count is more harmful to the performance compared to assuming a no relationship, keeping in mind that we only simulated two other spatial conditions. When specifying an intermediary effect, the pattern of the rRMSE is much closer to assuming no relationship. This could indicate again that dasymetric mapping would tolerate less strong assumptions. The misspecification effects are small and almost neglibile at $100 \times 100\,\text{m}$ resolution, indicating that if the spatial resolution is sufficiently small, the ancillary information is negligible. 
+
+When comparing scenarios 1 with 2, 3 with 4, 5 with 6, and 7 with 8, we see the effects of adding global autocorrelation in the datasets. The rRMSE increased when global autocorrelation was introduced, which happened for all dasymetric weight sets, resolutions, and grid shifts. 
+
+When comparing scenarios 1 with 5, 2 with 6, 3 with 7, 4 with 8, we see the effects of local autocorrelation. At the $100 \times 100\,\text{m}$ and $500 \times 500\,\text{m}$ resolutions, we see consistently see that adding local autocorrelation increased the rRMSE, which seemed to have a bigger effect on the rRMSE compared to global autocorrelation. However, at the $1000 \times 1000\,\text{m}$ resolution, independent of shift types, when comparing scenario 4 with 8, the local autocorrelation actually led to a slightly smaller rRMSE only when assuming no relationship between land use and count. This effect is not seen at finer resolutions. Since in scenarios 4 and 8 we simulated a relationship between land use and count, it indicates that there could be an interaction between user-specified weights, global and local autocorrelation, and grid resolution on the contribution to the rRMSE.
+
+
+# Appendix figures & tables
+For the appendix, it might be useful to have some extra tables and figures:
+
+## Figures
+
+### SQ1: Heatmap SAW stratified for MAUP (both zoning and scaling)
+
+
+Heatmap SAW with all conditions:
+```{r MAUP heatmap SAW all conditions appendix}
+p_heatmap_saw <- ggplot(df_summary %>% filter(method_binary == "SAW"), aes(x = factor(cell_size), 
+                       y = factor(translation_id), 
+                       fill = mean_rRMSE)) +
+  geom_tile() +
+  facet_wrap(.~condition_id, labeller = labeller(condition_id = scenario_labels)) +   # one heatmap per condition
+  scale_fill_viridis_c(option = "plasma") +
+  labs(x = "Cell Size", y = "Grid Shift", fill = "Mean rRMSE") +
+  theme_minimal() + 
+  coord_flip() +
+  labs(
+    title = "MAUP effects mean rRMSE in simple areal weighting"
+  ) +
+    theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size =5),
+    plot.title = element_text(size=12)
+  )
+
+final_plot_heat_saw <-  p_heatmap_saw / p_table + plot_layout(heights = c(9, 1.5))
+final_plot_heat_saw
+```
+
+
+Dasymetric mapping all weight sets map:
+```{r}
+# Create named vector for legend labels dynamically
+alphas = c(0, 0.1, 0.2, 0.5, 0.7, 1, 2, 5, 7, 10) 
+labs_dasym <- paste0("alpha = ", alphas)  # alpha = 
+names(labs_dasym) <- paste0("dasym_", seq_along(alphas))
+
+# Optionally, make the extremes descriptive
+labs_dasym[["dasym_1"]] <- "none (alpha = 0)"
+labs_dasym[["dasym_10"]] <- "strong (alpha = 10)"
+
+# Then plug this into scale_color_viridis_d()
+plot_dasym_conditions_allweights <- final_frame %>%
+  mutate(
+    shift_type = case_when(
+      translation_id == 1 ~ "no shift",
+      translation_id %in% c(2, 3, 4, 5, 9, 13) ~ "vertical/\nhorizontal shift",
+      translation_id %in% c(6, 7, 8, 10, 11, 12, 14, 15, 16) ~ "diagonal shift",
+      TRUE ~ "other"
+    ),
+    shift_type = factor(shift_type, levels = c("no shift", "vertical/\nhorizontal shift", "diagonal shift"))
+  ) %>%
+  filter(method_binary != "SAW") %>%
+  mutate(method = factor(method, levels = paste0("dasym_", seq_along(alphas)))) %>%
+  group_by(condition_id, cell_size, shift_type, method) %>%
+  summarise(
+    mean_val = mean(NRMSE_mean, na.rm = TRUE),
+    sd_val = sd(NRMSE_mean, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(
+    x = factor(condition_id),
+    y = mean_val,
+    color = factor(method),
+    group = method
+  )) +
+  geom_point(position = position_dodge(width = 0.6), size = 0.8) +
+  facet_grid(shift_type ~ cell_size, scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  labs(
+    x = "Scenario",
+    y = "rRMSE (mean +- SD)",
+    color = "Dasymetric weight\nrelationship count ~ land use",
+    title = "rRMSE dasymetric mapping with all weight sets\nstratified by MAUP effects"
+  ) +
+  theme_minimal() +
+  scale_color_viridis_d(option = "B", labels = labs_dasym) +
+  theme(
+    legend.title = element_text(size = 8, face = "bold"),
+    legend.text = element_text(size = 8)
+  )
+
+# Combine with your table if needed
+plot_dasym_conditions_allweights / p_table + plot_layout(heights = c(8, 1))
+```
+
+Zoom in on 100x100m resolution plot dasymetric mapping all conditions 
+```{r}
+plot_dasym_conditions_zoom100 <- final_frame %>%
+  filter(cell_size == 100) %>% 
+  mutate(shift_type = case_when(
+    translation_id == 1 ~ "no shift",
+    translation_id %in% c(2, 3, 4, 5, 9, 13) ~ "vertical/\nhorizontal shift",
+    translation_id %in% c(6, 7, 8, 10, 11, 12, 14, 15, 16) ~ "diagonal shift",
+    TRUE ~ "other"   # optional catch-all
+  ), 
+  shift_type = factor(shift_type, levels = c("no shift", "vertical/\nhorizontal shift", "diagonal shift")
+                      )) %>% 
+  filter(method_binary != "SAW") %>%
+#  filter(method %in% c("dasym_1", "dasym_10")) %>% 
+  mutate(method = factor(method, levels = c("dasym_1", "dasym_2", "dasym_3", "dasym_4", "dasym_5", "dasym_6", "dasym_7", "dasym_8", "dasym_9", "dasym_10"))) %>% 
+  group_by(condition_id, cell_size, shift_type, method) %>%
+  summarise(
+    mean_val = mean(NRMSE_mean, na.rm = TRUE),
+    sd_val   = sd(NRMSE_mean, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  ggplot(aes(
+    x = factor(condition_id),
+    y = mean_val,
+    color = factor(method),
+    group = method
+  )) +
+  geom_point(position = position_dodge(width = 0.6), size = 1) +
+  geom_errorbar(
+    aes(ymin = mean_val - sd_val, ymax = mean_val + sd_val),
+    width = 1,
+    position = position_dodge(width = 0.6)
+  ) +
+  facet_grid(shift_type~cell_size, scales = "free", labeller = labeller(cell_size = cell_labels)) +
+  labs(
+    x = "Scenario",
+    y = "rRMSE (mean +- SD)",
+    color = "Dasymetric weight \nrelationship count ~ land use",
+    title = "rRMSE stratified by MAUP effects dasymetric mapping"
+  ) +
+  theme_minimal() +
+  scale_color_viridis_d(option = "H",
+                          labels = c(
+    "dasym_1" = "none",
+#    "dasym_7" = "intermediary",
+    "dasym_10" = "strong"
+  )) +
+    theme(
+    legend.title = element_text(size = 8, face = "bold"),
+    legend.text = element_text(size = 8)
+  )
+
+plot_dasym_conditions_zoom100 / p_table + plot_layout(heights = c(8, 1))
+```
+
+### SQ1: MAUP heatmap zoning (averaged over scaling) per condition
+
+For the zoning effects per condition
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# df_long should have: condition_id, method_binary, translation_id, mean_rRMSE
+
+df_summary_factors_zoning <- final_frame %>%
+  group_by(condition_id, method_binary, translation_id) %>% #only per shifts
+  summarise(mean_rRMSE = mean(NRMSE_mean), .groups = "drop")
+
+df_matrix_zoning <- df_summary_factors_zoning %>%
+  group_by(condition_id, method_binary) %>%
+  group_modify(~ {
+    vals <- .x %>% dplyr::select(translation_id, mean_rRMSE)
+    expand.grid(i = vals$translation_id, j = vals$translation_id) %>%
+      left_join(vals, by = c("i" = "translation_id")) %>%
+      rename(val_i = mean_rRMSE) %>%
+      left_join(vals, by = c("j" = "translation_id")) %>%
+      rename(val_j = mean_rRMSE) %>%
+      mutate(ratio = val_i / val_j)
+  }) %>%
+  ungroup() %>%
+  mutate(
+    i = factor(i, levels = sort(unique(i))),
+    j = factor(j, levels = sort(unique(j)))
+  )
+
+# Plot heatmap
+ggplot(
+  df_matrix_zoning %>%
+    filter(method_binary == "SAW") %>%
+    filter(condition_id %in% c(1,2,5,6)) %>% 
+    filter(as.numeric(j) <= as.numeric(i)),  # keep only upper triangle incl. diagonal
+  aes(x = j, y = i, fill = ratio)
+) +
+  geom_tile(color = "white") +
+  # optional: add labels inside tiles
+  # geom_text(aes(label = sprintf("%.2f", ratio)), size = 2.8) +
+  scale_fill_gradient2(
+    low = "cornflowerblue", mid = "white", high = "red4", midpoint = 1
+  ) +
+  facet_wrap(~ condition_id, labeller = labeller(condition_id = scenario_labels)) +
+  coord_equal() +
+  theme_minimal() +
+  labs(
+    x = "Denominator shift ID",
+    y = "Numerator shift ID",
+    fill = "Ratio",
+    title = "rRMSE ratio between shifts per scenario\n(simple areal weighting)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = -90, size = 5),
+    axis.text.y = element_text(size = 5)
+  )
+
+ggplot(
+  df_matrix_zoning %>%
+    filter(method_binary != "SAW") %>%
+    filter(as.numeric(j) <= as.numeric(i)),  # keep only upper triangle incl. diagonal
+  aes(x = j, y = i, fill = ratio)
+) +
+  geom_tile(color = "white") +
+  # optional: add labels inside tiles
+  # geom_text(aes(label = sprintf("%.2f", ratio)), size = 2.8) +
+  scale_fill_gradient2(
+    low = "cornflowerblue", mid = "white", high = "red4", midpoint = 1
+  ) +
+  facet_wrap(~ condition_id, labeller = labeller(condition_id = scenario_labels)) +
+  coord_equal() +
+  theme_minimal() +
+  labs(
+    x = "Denominator shift ID",
+    y = "Numerator shift ID",
+    fill = "Ratio",
+    title = "rRMSE ratio between shifts per scenario\n(dasymetric mapping)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = -90, size = 5),
+    axis.text.y = element_text(size = 5)
+  )
+
+```
+
+### SQ1: MAUP heatmap scaling (averaged over zoning) per condition
+
+Scaling resolution effect per condition
+```{r}
+# scaling
+df_summary_factors_scaling <- final_frame %>%
+  group_by(condition_id, method_binary, cell_size) %>% #only per shifts
+  summarise(mean_rRMSE = mean(NRMSE_mean), .groups = "drop")
+
+df_matrix_scaling <- df_summary_factors_scaling %>%
+  group_by(condition_id, method_binary) %>%
+  group_modify(~ {
+    vals <- .x %>% dplyr::select(cell_size, mean_rRMSE)
+    expand.grid(i = vals$cell_size, j = vals$cell_size) %>%
+      left_join(vals, by = c("i" = "cell_size")) %>%
+      rename(val_i = mean_rRMSE) %>%
+      left_join(vals, by = c("j" = "cell_size")) %>%
+      rename(val_j = mean_rRMSE) %>%
+      mutate(ratio = val_i / val_j)
+  }) %>%
+  ungroup() %>%
+  mutate(
+    i = factor(i, levels = sort(unique(i))),
+    j = factor(j, levels = sort(unique(j)))
+  )
+
+#
+
+ggplot(
+  df_matrix_scaling %>%
+    filter(method_binary == "SAW") %>%
+    filter(condition_id %in% c(1,2,5,6)) %>% 
+    filter(as.numeric(j) <= as.numeric(i)),  # keep only upper triangle incl. diagonal
+  aes(x = j, y = i, fill = ratio)
+) +
+  geom_tile(color = "white") +
+  # optional: add labels inside tiles
+  # geom_text(aes(label = sprintf("%.2f", ratio)), size = 2.8) +
+  scale_fill_gradient2(
+    low = "cornflowerblue", mid = "white", high = "red4", midpoint = 1
+  ) +
+  facet_wrap(~ condition_id, labeller = labeller(condition_id = scenario_labels)) +
+  coord_equal() +
+  theme_minimal() +
+  labs(
+    x = "Denominator resolution",
+    y = "Numerator resolution",
+    fill = "Ratio",
+    title = "rRMSE ratio between resolutions per scenario\n(simple areal weighting)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = -90, size = 5),
+    axis.text.y = element_text(size = 5)
+  )
+
+ggplot(
+  df_matrix_scaling %>%
+    filter(method_binary != "SAW") %>%
+    filter(as.numeric(j) <= as.numeric(i)),  # keep only upper triangle incl. diagonal
+  aes(x = j, y = i, fill = ratio)
+) +
+  geom_tile(color = "white") +
+  # optional: add labels inside tiles
+  # geom_text(aes(label = sprintf("%.2f", ratio)), size = 2.8) +
+  scale_fill_gradient2(
+    low = "cornflowerblue", mid = "white", high = "red4", midpoint = 1
+  ) +
+  facet_wrap(~ condition_id, labeller = labeller(condition_id = scenario_labels)) +
+  coord_equal() +
+  theme_minimal() +
+  labs(
+    x = "Denominator resolution",
+    y = "Numerator resolution",
+    fill = "Ratio",
+    title = "rRMSE ratio between resolutions per scenario\n(dasymetric mapping)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = -90, size = 5),
+    axis.text.y = element_text(size = 5)
+  )
+
+```
+
+## Tables
+To get actual numbers (for reference), we make a table
+
+```{r}
+cat_table_latex <- function(wanted_method){
+  table_out <- final_frame %>%
+  filter(method == wanted_method) %>%
+  mutate(
+    shift_type = case_when(
+      translation_id == 1 ~ "no shift",
+      translation_id %in% c(2,3,4,5,9,13) ~ "vertical/horizontal shift",
+      translation_id %in% c(6,7,8,10,11,12,14,15,16) ~ "diagonal shift"
+    ),
+    cell_size = factor(cell_size, levels=c(100,500,1000),
+                       labels=c("100×100 m","500×500 m","1000×1000 m"))
+  ) %>%
+  group_by(condition_id, cell_size, shift_type) %>%
+  summarise(result = sprintf("%.2e +- %.2e", mean(NRMSE_mean), sd(NRMSE_mean)),
+            .groups="drop") %>%
+  unite(col="colname", cell_size, shift_type, sep="__") %>%
+  pivot_wider(names_from=colname, values_from=result) %>%
+  arrange(condition_id)
+
+# Clean column names: keep only shift type for second-level headers
+new_colnames <- colnames(table_out)
+new_colnames_clean <- sapply(new_colnames, function(x) {
+  if (x == "condition_id") return(x)
+  strsplit(x, "__")[[1]][2]  # keep only the part after __
+})
+colnames(table_out) <- new_colnames_clean
+
+# Define top-level header (cell sizes)
+top_header <- c(" " = 1, "100×100 m" = 3, "500×500 m" = 3, "1000×1000 m" = 3)
+
+# Print sideways tablet
+tab_out = kbl(table_out ,
+    caption= paste0("rRMSE results for ", wanted_method),
+    booktabs=TRUE,
+    format="latex",
+    linesep="") %>%
+  kable_styling(latex_options=c("HOLD_position")) %>%
+  add_header_above(top_header)
+
+
+return(cat(tab_out))
+
+}
+
+# print table
+
+#cat_table_latex(wanted_method = "SAW")
+#cat_table_latex(wanted_method = "dasym_1") # weak
+#cat_table_latex(wanted_method = "dasym_7") # intermediate
+#cat_table_latex(wanted_method = "dasym_10") # strong
+```
+
+
